@@ -1,0 +1,76 @@
+# Video Frame Border Cleaner
+
+This project removes letterbox/frame borders from video while keeping the content stable and optionally blurring the background in the eliminated area.
+
+It is designed for videos that may have:
+- black bars at the top and bottom
+- black bars just on the top or bottom
+- bars only on one side or partially on one side
+- border artifacts appearing only for a few frames
+- a frame crop that remains stable across the video
+
+## Features
+- Automatic detection of border strips in each frame
+- Robust estimation with median filtering across sampled frames
+- Removes detected bars on a per-frame basis
+- Supports either:
+  - crop-only mode
+  - blur-background mode
+- Works with standard MP4 and other OpenCV-supported video formats
+- Saves a processed output video
+
+## Install
+
+Python 3.10+ recommended.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Run
+
+```bash
+python remove_letterbox.py --input input.mp4 --output cleaned.mp4
+```
+
+### Recommended modes
+
+```bash
+# crop the bars away
+python remove_letterbox.py --input input.mp4 --output cleaned_crop.mp4 --mode crop
+
+# keep full frame size and blur the eliminated area
+python remove_letterbox.py --input input.mp4 --output cleaned_blur.mp4 --mode blur
+```
+
+### Optional tuning
+
+```bash
+python remove_letterbox.py \
+  --input input.mp4 \
+  --output cleaned.mp4 \
+  --mode blur \
+  --sample-every 10 \
+  --variance-threshold 22 \
+  --blur-size 31
+```
+
+## How it works
+
+1. Sample video frames at a fixed interval.
+2. Detect likely top, bottom, left, and right border strips.
+3. Take the median border sizes across samples to avoid jitter.
+4. For each frame, keep or extend the detected border so brief artifacts are also removed.
+5. Either crop the frame or paste the content onto a blurred background to preserve the full frame dimension.
+
+## Notes
+
+- The script is designed for letterboxing and fixed black/gray frame borders.
+- If a video uses a very stylized background with low variance near the edges, you may need to adjust `--variance-threshold`.
+- If the border is very subtle or colored, try a lower threshold and/or a different blur size.
+
+## License
+
+MIT
