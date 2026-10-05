@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
 Dynamic overlay remover for videos with burnt-in titles/captions or frame overlays.
-It estimates the top/bottom overlay bands from each sampled frame, smooths them over
-many frames, then removes the overlay area and fills it with a blurred copy of the
-content below/above it. This is designed for video layouts like news banners,
-caption bars, and other top/bottom superimposed graphic layers without assuming a
-fixed hardcoded border size.
+Detects top/bottom overlay bands by finding regions with consistently high edge/variance scores,
+allows for gaps in the overlay (text breaks), and removes those regions with blur fill.
 """
 
 import argparse
@@ -28,70 +25,80 @@ def row_score(frame):
         row = gray[y]
         row_var = float(row.var())
         edge_density = float(np.mean(edges[y] > 0))
-        # Large weight on edge density because text/logo overlays create dense edges.
         score = (row_var / 8.0) + (edge_density * 900.0)
         scores.append(score)
     return np.asarray(scores, dtype=np.float32)
 
 
-def detect_overlay_rows(frame):
-    """Detect top and bottom overlay rows, but only when the row score clearly differs from the main content."""
+def detect_overlay_rows(frame, gap_tolerance=30, min_band_size=20):
+    """
+    Detect top and bottom overlay rows by finding continuous (or near-continuous) high-score bands.
+    Allows small gaps in the band (text breaks) up to gap_tolerance pixels.
+    """
     h, w = frame.shape[:2]
     scores = row_score(frame)
 
-    if h < 50:
+    if h < 100:
         return {"top": 0, "bottom": 0}
 
-    center_start = int(h * 0.35)
-    center_end = int(h * 0.65)
-    center_scores = scores[center_start:center_end]
-    if center_scores.size == 0:
-        return {"top": 0, "bottom": 0}
+    # Use a lower threshold based on the overall distribution
+    threshold = float(np.percentile(scores, 75))
+    threshold = max(100.0, threshold * 0.6)
 
-    center_median = float(np.median(center_scores))
-    threshold_top = max(30.0, center_median * 1.35)
-    threshold_bottom = max(30.0, center_median * 1.25)
-
-    # Determine top band: rows near the top that are much more graphic-heavy than the center.
+    # Find top band: rows near the top with high scores, allowing small gaps
     top_band_start = None
     top_band_end = 0
+    gap_count = 0
+
     for y in range(0, min(h // 2, int(h * 0.45))):
-        if scores[y] >= threshold_top:
+        if scores[y] >= threshold:
             if top_band_start is None:
                 top_band_start = y
             top_band_end = y
-        elif top_band_start is not None:
-            break
+            gap_count = 0
+        else:
+            if top_band_start is not None:
+                gap_count += 1
+                if gap_count > gap_tolerance:
+                    break
 
-    # Determine bottom band: rows near the bottom that are much more graphic-heavy than the center.
+    # Find bottom band: rows near the bottom with high scores, allowing small gaps
     bottom_band_start = h
     bottom_band_end = h
+    gap_count = 0
+
     for y in range(h - 1, max(h // 2, int(h * 0.55)) - 1, -1):
-        if scores[y] >= threshold_bottom:
+        if scores[y] >= threshold:
             if bottom_band_start == h:
                 bottom_band_start = y
             bottom_band_end = y
-        elif bottom_band_start != h:
-            break
+            gap_count = 0
+        else:
+            if bottom_band_start != h:
+                gap_count += 1
+                if gap_count > gap_tolerance:
+                    break
 
     top_cut = 0
-    if top_band_start is not None and top_band_end - top_band_start >= 12:
-        top_cut = int(max(0, top_band_start))
+    if top_band_start is not None and (top_band_end - top_band_start) >= min_band_size:
+        # Include some margin to catch the full overlay
+        top_cut = max(0, top_band_start - 5)
 
     bottom_cut = 0
-    if bottom_band_start != h and bottom_band_end - bottom_band_start >= 12:
-        bottom_cut = int(max(0, h - bottom_band_start))
+    if bottom_band_start != h and (bottom_band_start - bottom_band_end) >= min_band_size:
+        # Include some margin to catch the full overlay
+        bottom_cut = max(0, h - bottom_band_start - 5)
 
-    # Ignore tiny accidental detections.
-    if top_cut and top_cut < 20:
+    # Ignore tiny accidental detections
+    if top_cut and top_cut < 15:
         top_cut = 0
-    if bottom_cut and bottom_cut < 20:
+    if bottom_cut and bottom_cut < 15:
         bottom_cut = 0
 
     return {"top": int(top_cut), "bottom": int(bottom_cut)}
 
 
-def detect_bounds_across_video(video_path, sample_every=15, max_samples=80):
+def detect_bounds_across_video(video_path, sample_every=10, max_samples=100):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video: {video_path}")
@@ -110,7 +117,7 @@ def detect_bounds_across_video(video_path, sample_every=15, max_samples=80):
             frame_count += 1
             continue
 
-        bounds = detect_overlay_rows(frame)
+        bounds = detect_overlay_rows(frame, gap_tolerance=40, min_band_size=15)
         sampled_top.append(bounds["top"])
         sampled_bottom.append(bounds["bottom"])
         sample_count += 1
@@ -131,29 +138,26 @@ def blur_fill_overlay(frame, top_cut, bottom_cut, blur_size=61):
     if blur_size % 2 == 0:
         blur_size += 1
 
-    # Blur the whole frame to create a background-like fill.
+    # Blur the whole frame to create a background-like fill
     blurred = cv2.GaussianBlur(frame, (blur_size, blur_size), 0)
     result = blurred.copy()
 
-    top_y = top_cut
-    bottom_y = h - bottom_cut
-    if bottom_cut > 0:
-        result[bottom_y:h, :] = frame[bottom_y:h, :]
+    # Keep the original content in the center, blurred edges fill the removed overlay regions
     if top_cut > 0:
-        result[0:top_y, :] = frame[0:top_y, :]
+        result[0:top_cut, :] = frame[0:top_cut, :]
+    if bottom_cut > 0:
+        result[h - bottom_cut:h, :] = frame[h - bottom_cut:h, :]
 
-    # We intentionally leave the central content untouched, but we also keep the blurred background in
-    # areas outside the detected overlay. In a typical top/bottom overlay case this produces a natural blur fill.
-    if top_cut > 0 or bottom_cut > 0:
-        center_start = top_cut
-        center_end = h - bottom_cut if bottom_cut > 0 else h
-        if center_end > center_start:
-            result[center_start:center_end, :] = frame[center_start:center_end, :]
+    # Preserve the center content region
+    center_start = top_cut
+    center_end = h - bottom_cut if bottom_cut > 0 else h
+    if center_end > center_start:
+        result[center_start:center_end, :] = frame[center_start:center_end, :]
 
     return result
 
 
-def process_video(input_path, output_path, blur_size=61, sample_every=15, max_samples=80):
+def process_video(input_path, output_path, blur_size=61, sample_every=10, max_samples=100):
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input video not found: {input_path}")
 
@@ -202,8 +206,8 @@ def main():
     parser.add_argument("--input", required=True, help="Path to source video")
     parser.add_argument("--output", required=True, help="Path to write cleaned video")
     parser.add_argument("--blur-size", type=int, default=61, help="Blur size used on the fill region")
-    parser.add_argument("--sample-every", type=int, default=15, help="Sample every Nth frame for detection")
-    parser.add_argument("--max-samples", type=int, default=80, help="Maximum detected samples across the video")
+    parser.add_argument("--sample-every", type=int, default=10, help="Sample every Nth frame for detection")
+    parser.add_argument("--max-samples", type=int, default=100, help="Maximum detected samples across the video")
     args = parser.parse_args()
 
     try:
