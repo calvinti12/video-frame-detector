@@ -30,10 +30,10 @@ def row_score(frame):
     return np.asarray(scores, dtype=np.float32)
 
 
-def detect_overlay_rows(frame, gap_tolerance=30, min_band_size=20):
+def detect_overlay_rows(frame, gap_tolerance=100, min_band_size=20):
     """
     Detect top and bottom overlay rows by finding continuous (or near-continuous) high-score bands.
-    Allows small gaps in the band (text breaks) up to gap_tolerance pixels.
+    Allows larger gaps in the band (text breaks, gaps between overlay elements) up to gap_tolerance pixels.
     """
     h, w = frame.shape[:2]
     scores = row_score(frame)
@@ -43,14 +43,14 @@ def detect_overlay_rows(frame, gap_tolerance=30, min_band_size=20):
 
     # Use a lower threshold based on the overall distribution
     threshold = float(np.percentile(scores, 75))
-    threshold = max(100.0, threshold * 0.6)
+    threshold = max(100.0, threshold * 0.5)
 
-    # Find top band: rows near the top with high scores, allowing small gaps
+    # Find top band: rows near the top with high scores, allowing larger gaps
     top_band_start = None
     top_band_end = 0
     gap_count = 0
 
-    for y in range(0, min(h // 2, int(h * 0.45))):
+    for y in range(0, min(h // 2, int(h * 0.5))):
         if scores[y] >= threshold:
             if top_band_start is None:
                 top_band_start = y
@@ -62,12 +62,12 @@ def detect_overlay_rows(frame, gap_tolerance=30, min_band_size=20):
                 if gap_count > gap_tolerance:
                     break
 
-    # Find bottom band: rows near the bottom with high scores, allowing small gaps
+    # Find bottom band: rows near the bottom with high scores, allowing larger gaps
     bottom_band_start = h
     bottom_band_end = h
     gap_count = 0
 
-    for y in range(h - 1, max(h // 2, int(h * 0.55)) - 1, -1):
+    for y in range(h - 1, max(h // 2, int(h * 0.5)) - 1, -1):
         if scores[y] >= threshold:
             if bottom_band_start == h:
                 bottom_band_start = y
@@ -117,7 +117,7 @@ def detect_bounds_across_video(video_path, sample_every=10, max_samples=100):
             frame_count += 1
             continue
 
-        bounds = detect_overlay_rows(frame, gap_tolerance=40, min_band_size=15)
+        bounds = detect_overlay_rows(frame, gap_tolerance=100, min_band_size=15)
         sampled_top.append(bounds["top"])
         sampled_bottom.append(bounds["bottom"])
         sample_count += 1
